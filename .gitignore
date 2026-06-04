@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local widget config (contains your private session cookie — never commit!)
+.claude_usage_widget/
+config.json
