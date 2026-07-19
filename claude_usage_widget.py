@@ -114,6 +114,7 @@ DEFAULT_REFRESH = 60       # seconds
 DEMO_DATA = {
     "session": {"pct": 63, "reset_text": "resets in 3h 12m"},
     "weekly": {"pct": 41, "reset_text": "resets Mon 9:00 AM"},
+    "model": {"pct": 12, "reset_text": "resets Mon 9:00 AM", "label": "Fable (7d)"},
 }
 
 
@@ -192,6 +193,43 @@ def _find_key(obj, keys):
     return None
 
 
+def _find_model_scoped_bucket(data):
+    """Find the model-scoped weekly limit (e.g. Fable) in the `limits` array."""
+    limits = _find_key(data, ("limits",))
+    if not isinstance(limits, list):
+        return None
+    for entry in limits:
+        if not isinstance(entry, dict):
+            continue
+        scope = entry.get("scope")
+        if isinstance(scope, dict) and isinstance(scope.get("model"), dict):
+            return entry
+    return None
+
+
+def _find_limit_entry(data, group):
+    """Find the unscoped `limits` entry for a group ("session" / "weekly")."""
+    limits = _find_key(data, ("limits",))
+    if not isinstance(limits, list):
+        return None
+    for entry in limits:
+        if (isinstance(entry, dict) and entry.get("group") == group
+                and entry.get("scope") is None):
+            return entry
+    return None
+
+
+def _percent_from_limit_entry(entry):
+    """`limits[].percent` is always 0–100, so a value of 1 means 1% — skip the
+    0–1 fraction scaling that _normalize_percent would apply."""
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("percent")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return round(max(0.0, min(100.0, float(value))))
+
+
 def _normalize_percent(value):
     """Turn a raw value into an integer 0–100, or None if not numeric.
     Fractions (0–1) are scaled to percentages."""
@@ -265,16 +303,25 @@ def parse_usage(data) -> dict | None:
     if not isinstance(data, (dict, list)):
         return None
 
-    session_bucket = _find_key(data, SESSION_KEYS)
-    weekly_bucket = _find_key(data, WEEKLY_KEYS)
+    # Prefer the `limits` array: its `percent` is unambiguously 0–100, unlike
+    # `utilization`, where a value of 1.0 (meaning 1%) would be misread as a
+    # 0–1 fraction by _normalize_percent.
+    session_bucket = _find_limit_entry(data, "session")
+    weekly_bucket = _find_limit_entry(data, "weekly")
+    session_pct = _percent_from_limit_entry(session_bucket)
+    weekly_pct = _percent_from_limit_entry(weekly_bucket)
 
-    session_pct = _percent_from_bucket(session_bucket)
-    weekly_pct = _percent_from_bucket(weekly_bucket)
+    if session_pct is None:
+        session_bucket = _find_key(data, SESSION_KEYS)
+        session_pct = _percent_from_bucket(session_bucket)
+    if weekly_pct is None:
+        weekly_bucket = _find_key(data, WEEKLY_KEYS)
+        weekly_pct = _percent_from_bucket(weekly_bucket)
 
     if session_pct is None or weekly_pct is None:
         return None
 
-    return {
+    result = {
         "session": {
             "pct": session_pct,
             "reset_text": _reset_text_from_bucket(session_bucket),
@@ -284,6 +331,23 @@ def parse_usage(data) -> dict | None:
             "reset_text": _reset_text_from_bucket(weekly_bucket),
         },
     }
+
+    # Optional model-scoped weekly limit (e.g. Fable). Absent on some plans,
+    # so it never forces the demo fallback.
+    model_bucket = _find_model_scoped_bucket(data)
+    model_pct = _percent_from_limit_entry(model_bucket)
+    if model_pct is None:
+        model_pct = _percent_from_bucket(model_bucket)
+    if model_pct is not None:
+        name = model_bucket.get("scope", {}).get("model", {}).get("display_name")
+        name = name if isinstance(name, str) and name.strip() else "Fable"
+        result["model"] = {
+            "pct": model_pct,
+            "reset_text": _reset_text_from_bucket(model_bucket),
+            "label": f"{name} (7d)",
+        }
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +473,7 @@ class UsageWidget(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(WIN_W, WIN_H)
+        self.setFixedSize(WIN_W, self._card_height())
 
         # Right-click menu
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -426,6 +490,11 @@ class UsageWidget(QWidget):
 
         # First fetch right away
         self.refresh()
+
+    def _card_height(self) -> int:
+        """Card height grows with the number of meters (2 or 3 sections)."""
+        n = 3 if self.data.get("model") else 2
+        return PADDING + 28 + 64 * n + 24
 
     # ----- positioning ------------------------------------------------------
 
@@ -525,6 +594,7 @@ class UsageWidget(QWidget):
         self.data = data if data else DEMO_DATA
         self.is_demo = bool(is_demo)
         self.updated_at = datetime.now().strftime("%H:%M")
+        self.setFixedSize(WIN_W, self._card_height())
         self.update()  # repaint
 
     # ----- context menu -----------------------------------------------------
@@ -569,7 +639,7 @@ class UsageWidget(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
 
-        rect = QRectF(0.5, 0.5, WIN_W - 1, WIN_H - 1)
+        rect = QRectF(0.5, 0.5, WIN_W - 1, self.height() - 1)
 
         # Rounded card (fill + thin border) — painted manually, no QSS radius.
         path = QPainterPath()
@@ -604,21 +674,22 @@ class UsageWidget(QWidget):
         # --- Sections ---
         section_top = PADDING + 28
         section_gap = 64
-        self._draw_section(
-            p, left, section_top, width,
-            "Session (5h)", self.data.get("session", {}),
-        )
-        self._draw_section(
-            p, left, section_top + section_gap, width,
-            "Weekly (7d)", self.data.get("weekly", {}),
-        )
+        sections = [
+            ("Session (5h)", self.data.get("session", {})),
+            ("Weekly (7d)", self.data.get("weekly", {})),
+        ]
+        model = self.data.get("model")
+        if model:
+            sections.append((model.get("label", "Fable (7d)"), model))
+        for i, (label, bucket) in enumerate(sections):
+            self._draw_section(p, left, section_top + i * section_gap, width, label, bucket)
 
         # --- Footer ---
         p.setPen(QColor(TEXT_MUTED))
         p.setFont(self._font(10))
         footer = f"updated {self.updated_at}" if self.updated_at else "updating…"
         p.drawText(
-            QRect(left, WIN_H - PADDING - 6, width, 14),
+            QRect(left, self.height() - PADDING - 6, width, 14),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             footer,
         )
