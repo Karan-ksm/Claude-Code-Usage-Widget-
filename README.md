@@ -1,10 +1,13 @@
 # Claude Usage Widget
 
 A tiny, always-visible **macOS desktop widget** that shows your Claude usage as
-two coral progress bars:
+coral progress bars:
 
 - **Session (5h)** — your rolling 5-hour window
 - **Weekly (7d)** — your rolling 7-day window
+- **Model weekly (7d)** — the model-specific weekly limit (e.g. **Fable**), shown
+  automatically when your plan reports one; the label follows the model name the
+  API returns
 
 It's a single Python file. **PyQt6 is the only dependency** (everything else is
 the Python standard library). It runs out of the box with convincing **demo
@@ -24,8 +27,9 @@ A dark, frosted, rounded card that floats on your wallpaper:
 
 - Coral dot + **"Claude usage"** header, with a small **`demo`** badge while it's
   showing demo data.
-- Two sections, each with a label, an integer percentage, a thin coral progress
-  bar, and a muted "resets in …" line.
+- Two or three sections, each with a label, an integer percentage, a thin coral
+  progress bar, and a muted "resets in …" line. The card grows to fit when the
+  model-specific meter (e.g. Fable) is present.
 - A muted `updated HH:MM` footer that refreshes on each fetch.
 
 ### Desktop-widget behavior
@@ -118,7 +122,7 @@ browser's DevTools:
 5. **Reload** the page (`Cmd-R`) so the requests are captured.
 6. Click through the requests and look at each **Response / Preview**. Find the
    one whose JSON contains your usage numbers (look for keys like `five_hour`,
-   `seven_day`, `utilization`, `percent_used`, `resets_at`).
+   `seven_day`, `limits`, `utilization`, `percent_used`, `resets_at`).
 7. From that request's **Headers** tab:
    - Copy the full **Request URL** → paste into Settings → **Usage URL**.
    - Under **Request Headers**, copy the entire **`Cookie:`** value (one long
@@ -130,12 +134,18 @@ real numbers (the `demo` badge disappears).
 
 ### If it stays on "demo" after configuring
 
-The endpoint's JSON shape probably differs from what the parser expects. Open
-`claude_usage_widget.py` and tweak the key lists near `parse_usage()`:
+The endpoint's JSON shape probably differs from what the parser expects. The
+parser first looks for the endpoint's `limits` array (whose `percent` values are
+unambiguously 0–100, and which carries the model-specific meter); if that's
+absent it falls back to a generic key search. Open `claude_usage_widget.py` and
+tweak the key lists near `parse_usage()`:
 
 - `SESSION_KEYS`, `WEEKLY_KEYS` — names that identify each bucket
 - `PERCENT_KEYS` — keys holding the percentage/utilization
 - `RESET_KEYS` — keys holding the ISO reset timestamp
+
+The model-specific meter is optional: if the response has no model-scoped entry
+in `limits`, the widget simply shows the two standard meters.
 
 The widget **never blanks or crashes**: if the URL/cookie are empty, the fetch
 fails, or the JSON can't be parsed, it silently falls back to demo data.
